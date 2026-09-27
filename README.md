@@ -46,6 +46,12 @@ Running `judge_simulator.py` with an actual LLM judge (`LLM_PROVIDER=groq`, `LLM
 
 Scores show run-to-run variance of roughly ±1–2 points on identical input under the Groq judge (LLM-judge noise, not code changes) — treat single-point deltas between runs as noise, not signal.
 
+### Production verification
+
+Re-ran `full_evaluation` against the deployed public URL (Render) rather than localhost: **38/50 (76%)**, identical to the last local run. Per-dimension averages matched exactly (Specificity 7, Category Fit 8, Merchant Fit 8, Decision Quality 8, Engagement 7). No environment drift between local and production.
+
+The two lowest-scoring messages in that run were both `compose_active_planning` outputs (36/50 and 32/50), each scoring **Specificity 3/10** — direct empirical confirmation of the honesty/Specificity tradeoff described below, not just a theoretical concern. One other message ("Dr. Bharat, noticed your calls dipped 50%...") scored **Merchant Fit 5/10**, the single lowest Merchant Fit across all 14 messages — flagged in Known Limitations as worth a follow-up look.
+
 ## Bugs found and fixed during real-LLM testing
 
 The local heuristic scorer's 90-98% masked three real defects, only surfaced once a real LLM judge was used:
@@ -63,19 +69,41 @@ The local heuristic scorer's 90-98% masked three real defects, only surfaced onc
 
 ## Known limitations
 
-- **`get_customer_name()` on minor-linked accounts**: for `trial_followup` triggers involving a child customer record with a parent field (e.g. `c_012_karthik_jr_for_m008`), the current implementation produces "Hi Karthik (parent: Sumitra)!" rather than addressing the parent directly. Since these messages go to a parent's WhatsApp, the more natural framing would greet the parent by name. Not fixed in this submission — flagged for follow-up.
-- **Trade-off between honesty and Specificity score**: removing fabricated pricing from `compose_active_planning` improved grounding integrity but *lowered* that composer's Specificity score (the rubric rewards concrete numbers regardless of whether they'd be real) — an inherent tension between the rubric's Specificity dimension and the "no fabrication" constraint. We chose honesty over score-maximization; see the case-study note in the commit history for the considered alternative (framing invented numbers explicitly as illustrative proposals) that was not adopted for this submission.
+- **Trade-off between honesty and Specificity score**: removing fabricated pricing from `compose_active_planning` improved grounding integrity but *lowered* that composer's Specificity score (the rubric rewards concrete numbers regardless of whether they'd be real) — an inherent tension between the rubric's Specificity dimension and the "no fabrication" constraint. We chose honesty over score-maximization; see the case-study note in the commit history for the considered alternative (framing invented numbers explicitly as illustrative proposals) that was not adopted for this submission. **Confirmed empirically**: in the production judge run, both `compose_active_planning` messages scored Specificity 3/10 — the two lowest Specificity scores of the run — directly bearing out this predicted cost.
 - **Single-action-per-merchant-per-tick** means `renewal_due` and `trial_followup` triggers for merchants that also have a higher-ranked competing trigger active in the same tick window (e.g. `perf_dip`, `active_planning_intent`) will not surface in that tick. Both composers are implemented and verified correct via direct single-trigger `/v1/tick` calls; they were not exercised in the full 25-trigger batch judge run for this reason.
+- **Merchant Fit outlier on a `perf_dip` message**: the production judge run scored one composition ("Dr. Bharat, noticed your calls dipped 50%...") at Merchant Fit 5/10, the lowest Merchant Fit of any scored message and a clear outlier against the 8/10 average. Not yet root-caused — worth a follow-up look at that composer's merchant-personalization logic before further submissions.
+
+## Fixed since initial real-LLM testing
+
+- **`get_customer_name()` on minor-linked accounts**: for `trial_followup` triggers involving a child customer record with a parent field (e.g. `c_012_karthik_jr_for_m008`), the engine previously produced "Hi Karthik (parent: Sumitra)!" rather than addressing the parent directly. Since these messages go to a parent's WhatsApp, greeting the parent is the natural framing. **Fixed**: `get_customer_name()` now detects the `"(parent: X)"` pattern and returns the parent's name for the greeting; a new `get_customer_child_name()` helper extracts the child's name so composers can still reference them by name in the body (e.g. "Hi Sumitra! Hope Karthik enjoyed the trial session..."). Verified against the real dataset record and the full canonical test suite (no regressions).
+- **Typo in `compose_active_planning`**: the merchant's quoted message was preceded by "You said:" mid-sentence (should be lowercase). Fixed to "you said:".
+- **`submission.jsonl` regenerated** against current code — the previous file predated the bug fixes above and still contained fabricated pricing in 7 of the 30 canonical test-pair outputs (e.g. invented ₹125/₹115/₹105 thali tiers). Current file reflects the de-fabricated, correctly-routed composer output.
 
 ## Deployment
 
+**Live URL**: https://vera-message-engine-fhvt.onrender.com
+
+Deployed on Render via the included `render.yaml` Blueprint (auto-detects build/start commands and the `/v1/healthz` health check). `Procfile` and `Dockerfile` are also included for Railway/Fly.io or any other platform. See `DEPLOY.md` for step-by-step instructions on all three.
+
+Locally:
 ```bash
 uvicorn app:app --host 0.0.0.0 --port 8080
 ```
 
-## Running the judge locally
+## Running the judge
 
+Against the local server (`BOT_URL` defaults to `http://localhost:8080`):
 ```bash
+LLM_PROVIDER=groq \
+LLM_API_KEY=<your-groq-key> \
+LLM_MODEL=openai/gpt-oss-120b \
+TEST_SCENARIO=full_evaluation \
+python3 judge_simulator.py
+```
+
+Against the deployed instance, additionally set `BOT_URL`:
+```bash
+BOT_URL=https://vera-message-engine-fhvt.onrender.com \
 LLM_PROVIDER=groq \
 LLM_API_KEY=<your-groq-key> \
 LLM_MODEL=openai/gpt-oss-120b \
